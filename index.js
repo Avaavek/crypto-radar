@@ -500,50 +500,50 @@ async function analyzeSymbol(symbol) {
 function buildMessage(r) {
   const { symbol, price, totalScore, tfAlignment, tfResults, levels, funding } = r;
   const pct = Math.round(totalScore/30*100);
-  const lvl = pct>=90?'MAKSIMUM SIQNAL':pct>=75?'GUCLU SIQNAL':pct>=60?'YAXSI SIQNAL':'SIQNAL';
+  const lvl = pct>=90?'🔥 MAKSIMUM SIQNAL':pct>=75?'⚡ GUCLU SIQNAL':pct>=60?'💪 YAXSI SIQNAL':'📊 SIQNAL';
   const acc = totalSignals>0 ? ((correctCalls/totalSignals)*100).toFixed(1)+'%' : 'Hesablanir';
   const fg  = marketState.fearGreed;
-  const fgL = fg<25?'ASIRI QORXU':fg<45?'QORXU':fg<55?'NEYTRAL':fg<75?'TAMAH':'ASIRI TAMAH';
+  const fgL = fg<25?'😱 ASIRI QORXU':fg<45?'😰 QORXU':fg<55?'😐 NEYTRAL':fg<75?'😏 TAMAH':'🤑 ASIRI TAMAH';
 
-  const tfLine = tfResults.map(t =>
-    TF_LABELS[t.tf] + ': ' + (t.score>=5?'OK':t.score>=2?'--':'XX') + ' (' + t.score + ')'
-  ).join('\n');
+  const tfLine = tfResults.map(t => {
+    const e = t.score>=5?'✅':t.score>=2?'⚠️':'❌';
+    return e+' '+TF_LABELS[t.tf]+': '+(t.score>=5?'OK':t.score>=2?'--':'XX')+' ('+t.score+')';
+  }).join('\n');
 
   let tech = '';
   for (const t of tfResults) {
     if (t.signals.length > 0) {
-      tech += '\n[' + TF_LABELS[t.tf] + ']\n';
-      tech += t.signals.slice(0,2).map(s=>'- '+s).join('\n') + '\n';
+      tech += '\n📅 ['+TF_LABELS[t.tf]+']\n';
+      tech += t.signals.slice(0,2).map(s=>'• '+s).join('\n')+'\n';
     }
   }
 
-  return lvl + ': <b>' + symbol + '</b>\n' +
-    '================================\n' +
-    'Qiymet: <b>' + fmtPrice(price) + '</b>\n' +
-    'Uygunluq: <b>' + tfAlignment + '/7 timeframe</b>\n' +
-    'Xal: <b>' + totalScore + '/30</b>\n' +
-    '================================\n' +
-    'TIMEFRAME:\n' + tfLine + '\n' +
-    '================================\n' +
-    'GİRİS/CIXIS:\n' +
-    'Giris: <b>' + fmtPrice(levels.entry) + '</b>\n' +
-    'TP1: ' + fmtPrice(levels.tp1) + ' (' + levels.tp1Pct + '%)\n' +
-    'TP2: ' + fmtPrice(levels.tp2) + ' (' + levels.tp2Pct + '%)\n' +
-    'TP3: ' + fmtPrice(levels.tp3) + ' (' + levels.tp3Pct + '%)\n' +
-    'Stop Loss: ' + fmtPrice(levels.stopLoss) + ' (' + levels.slPct + '%)\n' +
-    'Risk/Reward: 1:' + levels.rr + '\n' +
-    '================================\n' +
-    'TEXNIKI:' + tech +
-    '================================\n' +
-    'BAZAR:\n' +
-    'Fear & Greed: ' + fg + ' (' + fgL + ')\n' +
-    'BTC Dominans: ' + marketState.btcDominance.toFixed(1) + '%\n' +
-    (funding!==0?'Funding: '+funding.toFixed(4)+'%\n':'') +
-    '================================\n' +
-    'Deqiqlik: ' + acc + (totalSignals>0?' ('+correctCalls+'/'+totalSignals+')':'') + '\n' +
-    new Date().toLocaleTimeString('az-AZ',{timeZone:'Asia/Baku'});
+  return lvl+': <b>'+symbol+'</b>\n'+
+    '================================\n'+
+    '💰 Qiymet: <b>'+fmtPrice(price)+'</b>\n'+
+    '🎯 Uygunluq: <b>'+tfAlignment+'/7 timeframe</b>\n'+
+    '⭐ Xal: <b>'+totalScore+'/30</b>\n'+
+    '================================\n'+
+    '📊 TIMEFRAME:\n'+tfLine+'\n'+
+    '================================\n'+
+    '📈 GİRİS/CIXIS:\n'+
+    '🟢 Giris: <b>'+fmtPrice(levels.entry)+'</b>\n'+
+    '🎯 TP1: '+fmtPrice(levels.tp1)+' ('+levels.tp1Pct+'%)\n'+
+    '🎯 TP2: '+fmtPrice(levels.tp2)+' ('+levels.tp2Pct+'%)\n'+
+    '🎯 TP3: '+fmtPrice(levels.tp3)+' ('+levels.tp3Pct+'%)\n'+
+    '🛑 Stop Loss: '+fmtPrice(levels.stopLoss)+' ('+levels.slPct+'%)\n'+
+    '⚖️ Risk/Reward: 1:'+levels.rr+'\n'+
+    '================================\n'+
+    '🔍 TEXNIKI:'+tech+
+    '================================\n'+
+    '🌍 BAZAR:\n'+
+    fgL+' Fear & Greed: '+fg+'\n'+
+    '₿ BTC Dominans: '+marketState.btcDominance.toFixed(1)+'%\n'+
+    (funding!==0?'💸 Funding: '+funding.toFixed(4)+'%\n':'')+
+    '================================\n'+
+    '🎯 Deqiqlik: '+acc+(totalSignals>0?' ('+correctCalls+'/'+totalSignals+')':'')+'\n'+
+    '⏰ '+new Date().toLocaleTimeString('az-AZ',{timeZone:'Asia/Baku'});
 }
-
 async function mainLoop() {
   checkCount++;
   console.log('\n['+new Date().toISOString()+'] Yoxlama #'+checkCount);
