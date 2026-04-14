@@ -3,21 +3,23 @@ const http  = require('http');
 
 const BOT_TOKEN = process.env.BOT_TOKEN || '8780430108:AAHysfwi4_XvOzW-HEs7QZWumon4V8xfiPs';
 const CHAT_ID   = process.env.CHAT_ID   || '1475632521';
-const INTERVAL  = 120000;
 
-const STABLE_IDS = [
-  'tether','usd-coin','dai','binance-usd','true-usd','frax','usdd',
-  'pax-dollar','neutrino','fei-usd','liquity-usd','vai','usdn',
-  'united-stables','tether-eurt','stasis-eurs','celo-dollar','reserve',
-  'terrausd','husd','eurs','sbtc','renbtc','steth','wbtc','weth'
+const STABLE_SYMBOLS = [
+  'USDTUSDT','USDCUSDT','DAIUSDT','BUSDUSDT','TUSDUSDT','FRAXUSDT',
+  'USDPUSDT','GUSDUSDT','LUSTUSDT','SUSDT','FDUSDT','PYUSDT'
 ];
 
-let prevData      = {};
 let sentAlerts    = {};
 let checkCount    = 0;
 let totalSignals  = 0;
 let correctCalls  = 0;
 let signalHistory = [];
+let marketState   = { fearGreed: 50, btcDominance: 50, fundingRates: {} };
+let topSymbols    = [];
+
+const TF_LABELS = { '1M':'AYLIK','1w':'HEFTELIK','1d':'GUNLUK','4h':'4 SAAT','1h':'1 SAAT','15m':'15 DEQ','5m':'5 DEQ' };
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function fmt(v) {
   if (!v) return '$0';
@@ -28,204 +30,625 @@ function fmt(v) {
 }
 
 function fmtPrice(p) {
-  if (!p && p !== 0) return '—';
+  if (!p && p !== 0) return '--';
   if (p >= 1000) return '$' + p.toLocaleString('en', {maximumFractionDigits:2});
   if (p >= 1)    return '$' + p.toFixed(3);
   if (p >= 0.01) return '$' + p.toFixed(5);
   return '$' + p.toFixed(8);
 }
 
-function isStable(coin) {
-  if (STABLE_IDS.includes(coin.id)) return true;
-  const p = coin.current_price || 0;
-  return (p >= 0.95 && p <= 1.05);
-}
-
 function fetchJSON(url) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { 'User-Agent': 'CryptoRadar/2.0' } }, (res) => {
+    const lib = url.startsWith('https') ? https : http;
+    lib.get(url, { headers: { 'User-Agent': 'CryptoRadar/4.0' } }, (res) => {
       let data = '';
       res.on('data', c => data += c);
       res.on('end', () => {
         try { resolve(JSON.parse(data)); }
-        catch(e) { reject(new Error('JSON parse xetasi')); }
+        catch(e) { reject(new Error('Parse xetasi')); }
       });
     }).on('error', reject);
   });
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function calculateScore(coin, prev) {
-  let score = 0;
-  const reasons = [];
-  const vol       = coin.total_volume || 0;
-  const price     = coin.current_price || 0;
-  const change    = coin.price_change_percentage_24h || 0;
-  const cap       = coin.market_cap || 0;
-  const rank      = coin.market_cap_rank || 999;
-  const prevVol   = prev.vol || 0;
-  const prevPrice = prev.price || 0;
-
-  const volRatio = prevVol > 0 ? vol / prevVol : 1;
-  if      (volRatio >= 8) { score += 4; reasons.push('Hecm ' + volRatio.toFixed(1) + 'x 🔥'); }
-  else if (volRatio >= 5) { score += 3; reasons.push('Hecm ' + volRatio.toFixed(1) + 'x ⚡'); }
-  else if (volRatio >= 3) { score += 2; reasons.push('Hecm ' + volRatio.toFixed(1) + 'x ↑'); }
-  else if (volRatio >= 2) { score += 1; reasons.push('Hecm ' + volRatio.toFixed(1) + 'x'); }
-  else return null;
-
-  if      (change >= 15) { score += 3; reasons.push('+' + change.toFixed(1) + '% 🚀'); }
-  else if (change >= 8)  { score += 2; reasons.push('+' + change.toFixed(1) + '% ↑'); }
-  else if (change >= 3)  { score += 1; reasons.push('+' + change.toFixed(1) + '%'); }
-  else if (change < -5)  { score -= 2; reasons.push(change.toFixed(1) + '% ↓'); }
-
-  if (prevPrice > 0) {
-    const priceMove = (price - prevPrice) / prevPrice * 100;
-    if      (priceMove >= 3)  { score += 2; reasons.push('Son 2deq: +' + priceMove.toFixed(1) + '%'); }
-    else if (priceMove >= 1)  { score += 1; reasons.push('Momentum ↑'); }
-    else if (priceMove <= -3) { score -= 1; }
-  }
-
-  if      (cap < 50e6)  { score += 2; reasons.push('Kicik cap 💎'); }
-  else if (cap < 200e6) { score += 1; reasons.push('Mid cap'); }
-  else if (cap > 5e9)   { score -= 1; }
-
-  if (cap > 0) {
-    const vcr = vol / cap;
-    if      (vcr >= 0.5) { score += 2; reasons.push('Hecm/Cap: ' + (vcr*100).toFixed(0) + '% 🔥'); }
-    else if (vcr >= 0.2) { score += 1; reasons.push('Hecm/Cap: ' + (vcr*100).toFixed(0) + '%'); }
-  }
-
-  if (rank >= 50 && rank <= 200) { score += 1; reasons.push('Rank #' + rank); }
-
-  return { score, reasons, volRatio };
+async function getBinanceCandles(symbol, interval, limit) {
+  try {
+    const url = 'https://api.binance.com/api/v3/klines?symbol=' + symbol + '&interval=' + interval + '&limit=' + limit;
+    const data = await fetchJSON(url);
+    return data.map(c => ({
+      time: c[0], open: parseFloat(c[1]), high: parseFloat(c[2]),
+      low: parseFloat(c[3]), close: parseFloat(c[4]),
+      volume: parseFloat(c[5]), buyVolume: parseFloat(c[9]), trades: parseInt(c[8])
+    }));
+  } catch(e) { return []; }
 }
 
-async function checkPastSignals(currentCoins) {
-  const now = Date.now();
-  const toCheck = signalHistory.filter(s =>
-    !s.checked &&
-    (now - s.timestamp) >= 30*60*1000 &&
-    (now - s.timestamp) <= 35*60*1000
-  );
-  for (const signal of toCheck) {
-    const coin = currentCoins.find(c => c.id === signal.id);
-    if (!coin) continue;
-    signal.checked = true;
-    const priceDiff = ((coin.current_price - signal.price) / signal.price) * 100;
-    const correct = priceDiff > 0;
-    totalSignals++;
-    if (correct) correctCalls++;
-    signal.result = { priceDiff, correct };
-    console.log('  Backtest: ' + signal.symbol + ' -> ' + (correct ? 'DURUST' : 'SEHV') + ' ' + priceDiff.toFixed(2) + '%');
+async function getTopSymbols() {
+  try {
+    const data = await fetchJSON('https://api.binance.com/api/v3/ticker/24hr');
+    return data
+      .filter(t => t.symbol.endsWith('USDT') && !STABLE_SYMBOLS.includes(t.symbol))
+      .filter(t => !t.symbol.includes('UP') && !t.symbol.includes('DOWN') && !t.symbol.includes('BEAR') && !t.symbol.includes('BULL'))
+      .filter(t => parseFloat(t.quoteVolume) > 5000000)
+      .sort((a,b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
+      .slice(0, 80)
+      .map(t => t.symbol);
+  } catch(e) { return []; }
+}
+
+async function getFundingRates() {
+  try {
+    const data = await fetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex');
+    const rates = {};
+    for (const d of data) {
+      if (d.symbol.endsWith('USDT')) rates[d.symbol] = parseFloat(d.lastFundingRate) * 100;
+    }
+    return rates;
+  } catch(e) { return {}; }
+}
+
+async function getFearGreed() {
+  try {
+    const data = await fetchJSON('https://api.alternative.me/fng/?limit=1');
+    return parseInt(data.data[0].value);
+  } catch(e) { return 50; }
+}
+
+async function getBTCDominance() {
+  try {
+    const data = await fetchJSON('https://api.coingecko.com/api/v3/global');
+    return data.data.market_cap_percentage.btc || 50;
+  } catch(e) { return 50; }
+}
+
+function calcRSI(candles, period) {
+  period = period || 14;
+  if (candles.length < period + 1) return null;
+  const closes = candles.map(c => c.close);
+  let gains = 0, losses = 0;
+  for (let i = closes.length - period; i < closes.length; i++) {
+    const diff = closes[i] - closes[i-1];
+    if (diff > 0) gains += diff; else losses -= diff;
   }
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  return Math.round(100 - (100 / (1 + avgGain / avgLoss)));
+}
+
+function calcStochRSI(candles, period) {
+  period = period || 14;
+  if (candles.length < period * 2) return null;
+  const rsiValues = [];
+  for (let i = period; i < candles.length; i++) {
+    const r = calcRSI(candles.slice(i - period, i + 1), period);
+    if (r !== null) rsiValues.push(r);
+  }
+  if (rsiValues.length < period) return null;
+  const recent = rsiValues.slice(-period);
+  const minR = Math.min(...recent);
+  const maxR = Math.max(...recent);
+  if (maxR === minR) return 50;
+  return Math.round(((rsiValues[rsiValues.length-1] - minR) / (maxR - minR)) * 100);
+}
+
+function ema(data, period) {
+  if (data.length < period) return null;
+  const k = 2 / (period + 1);
+  let val = data.slice(0, period).reduce((a,b) => a+b, 0) / period;
+  for (let i = period; i < data.length; i++) val = data[i] * k + val * (1 - k);
+  return val;
+}
+
+function calcMACD(candles) {
+  if (candles.length < 26) return null;
+  const closes = candles.map(c => c.close);
+  const e12 = ema(closes, 12);
+  const e26 = ema(closes, 26);
+  const macdLine = e12 - e26;
+  const macdVals = [];
+  for (let i = 26; i <= closes.length; i++) {
+    const m12 = ema(closes.slice(0, i), 12);
+    const m26 = ema(closes.slice(0, i), 26);
+    macdVals.push(m12 - m26);
+  }
+  const signal = ema(macdVals, 9);
+  const hist   = macdLine - signal;
+  const prevM  = macdVals[macdVals.length-2] || 0;
+  const prevS  = ema(macdVals.slice(0,-1), 9) || 0;
+  return {
+    macd: macdLine, signal, histogram: hist,
+    crossUp:   macdLine > signal && prevM <= prevS,
+    crossDown: macdLine < signal && prevM >= prevS,
+    histIncreasing: hist > (macdVals[macdVals.length-2] - (ema(macdVals.slice(0,-1),9)||0))
+  };
+}
+
+function calcBollinger(candles, period) {
+  period = period || 20;
+  if (candles.length < period) return null;
+  const closes = candles.slice(-period).map(c => c.close);
+  const sma = closes.reduce((a,b) => a+b, 0) / period;
+  const std = Math.sqrt(closes.reduce((a,b) => a + Math.pow(b-sma,2), 0) / period);
+  const upper = sma + 2*std, lower = sma - 2*std;
+  const price = candles[candles.length-1].close;
+  const bw = (upper - lower) / sma * 100;
+  return {
+    upper, middle: sma, lower, bandwidth: bw,
+    position: (price-lower)/(upper-lower),
+    atLower: price <= lower*1.01,
+    atUpper: price >= upper*0.99,
+    squeezed: bw < 5
+  };
+}
+
+function calcATR(candles, period) {
+  period = period || 14;
+  if (candles.length < period+1) return null;
+  const trs = [];
+  for (let i = 1; i < candles.length; i++) {
+    trs.push(Math.max(
+      candles[i].high - candles[i].low,
+      Math.abs(candles[i].high - candles[i-1].close),
+      Math.abs(candles[i].low  - candles[i-1].close)
+    ));
+  }
+  return trs.slice(-period).reduce((a,b) => a+b, 0) / period;
+}
+
+function calcCRT(candles) {
+  if (candles.length < 3) return null;
+  const prev = candles[candles.length-2];
+  const curr = candles[candles.length-1];
+  const range = prev.high - prev.low;
+  if (range <= 0) return null;
+  const pos = (curr.close - prev.low) / range;
+  return {
+    breakoutUp:   curr.close > prev.high,
+    breakoutDown: curr.close < prev.low,
+    position: Math.round(pos*100),
+    nearTop: pos > 0.8,
+    nearBot: pos < 0.2
+  };
+}
+
+function calcVolumeDelta(candles) {
+  if (candles.length < 5) return null;
+  const recent = candles.slice(-10);
+  let buy = 0, sell = 0;
+  for (const c of recent) {
+    buy  += c.buyVolume || 0;
+    sell += (c.volume - (c.buyVolume || 0));
+  }
+  const ratio = sell > 0 ? buy/sell : 1;
+  return { delta: buy-sell, ratio, bullish: ratio > 1.1, bearish: ratio < 0.9 };
+}
+
+function findOrderBlocks(candles) {
+  if (candles.length < 5) return { bullish: null, bearish: null };
+  let bullOB = null, bearOB = null;
+  for (let i = candles.length-10; i < candles.length-1; i++) {
+    if (i < 0) continue;
+    const c = candles[i], next = candles[i+1];
+    if (c.close < c.open && next.close > c.high) bullOB = { top: c.open, bottom: c.low };
+    if (c.close > c.open && next.close < c.low)  bearOB = { top: c.high, bottom: c.close };
+  }
+  return { bullish: bullOB, bearish: bearOB };
+}
+
+function findFVG(candles) {
+  if (candles.length < 3) return [];
+  const fvgs = [];
+  for (let i = 1; i < candles.length-1; i++) {
+    const prev = candles[i-1], next = candles[i+1];
+    if (next.low > prev.high)  fvgs.push({ type:'bullish', top:next.low, bottom:prev.high });
+    if (next.high < prev.low)  fvgs.push({ type:'bearish', top:prev.low, bottom:next.high });
+  }
+  return fvgs.slice(-5);
+}
+
+function findSupplyDemand(candles) {
+  if (candles.length < 10) return { supply:[], demand:[] };
+  const supply = [], demand = [];
+  for (let i = 2; i < candles.length-2; i++) {
+    const c = candles[i], n1 = candles[i+1], n2 = candles[i+2];
+    if (c.close < c.open && (c.open-c.close) > (c.high-c.low)*0.6 && n1.close < c.close && n2.close < n1.close)
+      supply.push({ top:c.high, bottom:c.open, strength:(c.open-c.close)/c.open*100 });
+    if (c.close > c.open && (c.close-c.open) > (c.high-c.low)*0.6 && n1.close > c.close && n2.close > n1.close)
+      demand.push({ top:c.close, bottom:c.low, strength:(c.close-c.open)/c.open*100 });
+  }
+  return { supply:supply.slice(-3), demand:demand.slice(-3) };
+}
+
+function analyzeMarketStructure(candles) {
+  if (candles.length < 10) return { trend:'neutral', breakup:false, breakdown:false };
+  const recent = candles.slice(-10);
+  let hh=0, hl=0, ll=0, lh=0;
+  for (let i=1; i<recent.length; i++) {
+    if (recent[i].high > recent[i-1].high) hh++;
+    if (recent[i].low  > recent[i-1].low)  hl++;
+    if (recent[i].low  < recent[i-1].low)  ll++;
+    if (recent[i].high < recent[i-1].high) lh++;
+  }
+  const last     = candles[candles.length-1];
+  const prevHigh = Math.max(...candles.slice(-5,-1).map(c=>c.high));
+  const prevLow  = Math.min(...candles.slice(-5,-1).map(c=>c.low));
+  return {
+    trend:     hh+hl > ll+lh ? 'bullish' : ll+lh > hh+hl ? 'bearish' : 'neutral',
+    breakup:   last.close > prevHigh,
+    breakdown: last.close < prevLow
+  };
+}
+
+function detectLiquiditySweep(candles) {
+  if (candles.length < 10) return null;
+  const prev   = candles.slice(-10,-5);
+  const recent = candles.slice(-5);
+  const pH = Math.max(...prev.map(c=>c.high));
+  const pL = Math.min(...prev.map(c=>c.low));
+  const last = recent[recent.length-1];
+  const prev1 = recent[recent.length-2];
+  if (prev1.high > pH && last.close < pH) return { type:'bearish_sweep', level:pH };
+  if (prev1.low  < pL && last.close > pL) return { type:'bullish_sweep', level:pL };
+  return null;
+}
+function analyzeTimeframe(tfCandles) {
+  if (!tfCandles || tfCandles.length < 5) return null;
+  let score = 0;
+  const signals = [];
+
+  const rsi      = calcRSI(tfCandles);
+  const stochRsi = calcStochRSI(tfCandles);
+  const macd     = calcMACD(tfCandles);
+  const boll     = calcBollinger(tfCandles);
+  const crt      = calcCRT(tfCandles);
+  const ms       = analyzeMarketStructure(tfCandles);
+  const ob       = findOrderBlocks(tfCandles);
+  const fvg      = findFVG(tfCandles);
+  const sd       = findSupplyDemand(tfCandles);
+  const liq      = detectLiquiditySweep(tfCandles);
+  const delta    = calcVolumeDelta(tfCandles);
+  const e9       = ema(tfCandles.map(c=>c.close), 9);
+  const e21      = ema(tfCandles.map(c=>c.close), 21);
+  const e50      = ema(tfCandles.map(c=>c.close), 50);
+  const e200     = ema(tfCandles.map(c=>c.close), 200);
+  const price    = tfCandles[tfCandles.length-1].close;
+
+  if (rsi !== null) {
+    if      (rsi < 25) { score += 3; signals.push('RSI ' + rsi + ' - cox satilmis'); }
+    else if (rsi < 35) { score += 2; signals.push('RSI ' + rsi + ' - satilmis'); }
+    else if (rsi < 45) { score += 1; signals.push('RSI ' + rsi); }
+    else if (rsi > 80) { score -= 2; signals.push('RSI ' + rsi + ' - asiri alinmis'); }
+    else if (rsi > 70) { score -= 1; signals.push('RSI ' + rsi + ' - yuksek'); }
+  }
+
+  if (stochRsi !== null) {
+    if      (stochRsi < 20) { score += 2; signals.push('StochRSI ' + stochRsi + ' - dib'); }
+    else if (stochRsi < 30) { score += 1; signals.push('StochRSI ' + stochRsi); }
+    else if (stochRsi > 80) { score -= 1; signals.push('StochRSI ' + stochRsi + ' - zirve'); }
+  }
+
+  if (macd) {
+    if      (macd.crossUp)                              { score += 3; signals.push('MACD - yuxari kecdi'); }
+    else if (macd.histIncreasing && macd.histogram > 0) { score += 2; signals.push('MACD - guclenme'); }
+    else if (macd.crossDown)                            { score -= 2; signals.push('MACD - asagi kecdi'); }
+  }
+
+  if (boll) {
+    if      (boll.atLower && boll.squeezed) { score += 3; signals.push('Bollinger - alt bant + sixilma'); }
+    else if (boll.atLower)                  { score += 2; signals.push('Bollinger - alt bantda'); }
+    else if (boll.squeezed)                 { score += 1; signals.push('Bollinger - sixilma'); }
+    else if (boll.atUpper)                  { score -= 1; signals.push('Bollinger - ust bantda'); }
+  }
+
+  if (e9 && e21) {
+    if      (e9 > e21 && price > e9)  { score += 2; signals.push('EMA 9>21 - yukselis'); }
+    else if (e9 < e21 && price < e9)  { score -= 1; }
+  }
+  if (e50  && price > e50)  { score += 1; signals.push('EMA50 ustunde'); }
+  if (e200 && price > e200) { score += 1; signals.push('EMA200 ustunde - uzunmuddetli bull'); }
+
+  if (crt) {
+    if      (crt.breakoutUp)   { score += 3; signals.push('CRT - yuxari breakout'); }
+    else if (crt.nearBot)      { score += 2; signals.push('CRT - alt zonada (' + crt.position + '%)'); }
+    else if (crt.breakoutDown) { score -= 2; signals.push('CRT - asagi breakout'); }
+  }
+
+  if      (ms.breakup)             { score += 3; signals.push('Market Structure - yeni zirve'); }
+  else if (ms.trend === 'bullish') { score += 2; signals.push('Market Structure - yukselis HH/HL'); }
+  else if (ms.trend === 'bearish') { score -= 1; }
+  else if (ms.breakdown)           { score -= 2; }
+
+  if (ob.bullish) {
+    const inOB = price >= ob.bullish.bottom && price <= ob.bullish.top * 1.02;
+    if (inOB) { score += 3; signals.push('ICT Order Block - bullish zonada'); }
+  }
+
+  const bullFVG = fvg.filter(f => f.type==='bullish' && price>=f.bottom && price<=f.top);
+  if (bullFVG.length > 0) { score += 2; signals.push('FVG - boslug dolduruluyor'); }
+
+  const inDemand = sd.demand.find(z => price >= z.bottom && price <= z.top*1.02);
+  if (inDemand) { score += 3; signals.push('Demand Zone - taleb zonasinda (' + inDemand.strength.toFixed(1) + '% guclu)'); }
+
+  if (liq && liq.type === 'bullish_sweep') { score += 3; signals.push('Likvidlik sweep - alis gelecek'); }
+
+  if (delta && delta.bullish) { score += 2; signals.push('Order Flow - alis tesyiqi (' + delta.ratio.toFixed(2) + 'x)'); }
+
+  return { score, signals, rsi };
+}
+
+function calculateLevels(candles4h, price) {
+  const atr = calcATR(candles4h, 14);
+  if (!atr) return null;
+  const sl   = price - atr * 1.5;
+  const tp1  = price + atr * 2;
+  const tp2  = price + atr * 4;
+  const tp3  = price + atr * 7;
+  return {
+    entry: price, stopLoss: sl, tp1, tp2, tp3,
+    slPct:  ((sl-price)/price*100).toFixed(2),
+    tp1Pct: ((tp1-price)/price*100).toFixed(2),
+    tp2Pct: ((tp2-price)/price*100).toFixed(2),
+    tp3Pct: ((tp3-price)/price*100).toFixed(2),
+    rr:     ((tp2-price)/(price-sl)).toFixed(1)
+  };
 }
 
 function sendTelegram(text) {
   return new Promise((resolve) => {
-    const body = JSON.stringify({ chat_id: CHAT_ID, text, parse_mode: 'HTML' });
+    const t = text.length > 4000 ? text.slice(0,4000)+'...' : text;
+    const body = JSON.stringify({ chat_id: CHAT_ID, text: t, parse_mode: 'HTML' });
     const options = {
       hostname: 'api.telegram.org',
       path: '/bot' + BOT_TOKEN + '/sendMessage',
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+      headers: { 'Content-Type':'application/json', 'Content-Length':Buffer.byteLength(body) }
     };
     const req = https.request(options, (res) => {
       let d = '';
-      res.on('data', c => d += c);
-      res.on('end', () => { try { const r = JSON.parse(d); if (!r.ok) console.error('Telegram xetasi:', r.description); } catch(e) {} resolve(); });
+      res.on('data', c => d+=c);
+      res.on('end', () => {
+        try { const r=JSON.parse(d); if(!r.ok) console.error('TG:',r.description); } catch(e){}
+        resolve();
+      });
     });
-    req.on('error', (e) => { console.error('Telegram xetasi:', e.message); resolve(); });
-    req.write(body);
-    req.end();
+    req.on('error', e => { console.error('TG xeta:',e.message); resolve(); });
+    req.write(body); req.end();
   });
 }
 
-async function checkVolumes() {
-  checkCount++;
-  console.log('[' + new Date().toISOString() + '] Yoxlama #' + checkCount);
-  try {
-    const url = 'https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=250&page=1&sparkline=false';
-    const data = await fetchJSON(url);
-    const now  = Date.now();
-    const newPrev = {};
-    const signals = [];
-
-    await checkPastSignals(data);
-
-    for (const c of data) {
-      newPrev[c.id] = { vol: c.total_volume || 0, price: c.current_price || 0, ts: now };
-      if (isStable(c)) continue;
-      if ((c.total_volume || 0) < 300000) continue;
-      if (!prevData[c.id]) continue;
-      const result = calculateScore(c, prevData[c.id]);
-      if (!result) continue;
-      const { score, reasons, volRatio } = result;
-      if (score < 6) continue;
-      if (sentAlerts[c.id] && (now - sentAlerts[c.id]) < 45*60*1000) continue;
-      signals.push({ ...c, score, reasons, volRatio });
-    }
-
-    prevData = newPrev;
-    signals.sort((a, b) => b.score - a.score);
-    const top = signals.slice(0, 2);
-
-    for (const c of top) {
-      sentAlerts[c.id] = now;
-      signalHistory.push({ id: c.id, symbol: c.symbol.toUpperCase(), price: c.current_price, score: c.score, timestamp: now, checked: false, result: null });
-      if (signalHistory.length > 200) signalHistory.shift();
-
-      const accuracy = totalSignals > 0 ? ((correctCalls / totalSignals) * 100).toFixed(1) + '%' : 'Hesablanir...';
-      const level = c.score >= 10 ? '🔥 GUCLU SIQNAL' : c.score >= 8 ? '⚡ YAXSI SIQNAL' : '📊 SIQNAL';
-      const change = c.price_change_percentage_24h || 0;
-      const changeEmoji = change >= 0 ? '📈' : '📉';
-      const sign = change >= 0 ? '+' : '';
-
-      const msg = level + ': <b>' + c.symbol.toUpperCase() + '</b>\n' +
-        '────────────────────────────\n' +
-        '💰 Qiymet: <b>' + fmtPrice(c.current_price) + '</b>\n' +
-        changeEmoji + ' 24s: ' + sign + change.toFixed(2) + '%\n' +
-        '📦 Hecm: ' + fmt(c.total_volume) + '\n' +
-        '🚀 Hecm artimi: <b>' + c.volRatio.toFixed(1) + 'x</b>\n' +
-        '⭐ Xal: <b>' + c.score + '/13</b>\n' +
-        '────────────────────────────\n' +
-        '📋 Sebbler:\n' + c.reasons.map(r => '  • ' + r).join('\n') + '\n' +
-        '────────────────────────────\n' +
-        '🎯 Sistem deqiqliyi: ' + accuracy + '\n' +
-        '⏰ ' + new Date().toLocaleTimeString('az-AZ', {timeZone:'Asia/Baku'});
-
-      await sendTelegram(msg);
-      console.log('  -> Gonderildi: ' + c.symbol.toUpperCase() + ' (xal: ' + c.score + ')');
-      await sleep(600);
-    }
-
-    if (top.length === 0) console.log('  -> Yuksek xalli siqnal yoxdur');
-
-    if (checkCount % 20 === 0 && totalSignals > 0) {
-      const acc = ((correctCalls / totalSignals) * 100).toFixed(1);
-      await sendTelegram('📊 <b>Sistem Statistikasi</b>\n────────────────────────────\n✅ Duzgun siqnal: ' + correctCalls + '/' + totalSignals + '\n🎯 Deqiqlik: <b>' + acc + '%</b>\n🔄 Yoxlama sayi: ' + checkCount + '\n⏰ ' + new Date().toLocaleTimeString('az-AZ', {timeZone:'Asia/Baku'}));
-    }
-
-  } catch(err) {
-    console.error('Xeta:', err.message);
-    if (err.message.includes('429') || err.message.includes('rate')) { await sleep(180000); }
+async function checkPastSignals(symbol, price) {
+  const now = Date.now();
+  const toCheck = signalHistory.filter(s =>
+    s.symbol === symbol && !s.checked &&
+    (now - s.timestamp) >= 4*60*60*1000 &&
+    (now - s.timestamp) <= 4.5*60*60*1000
+  );
+  for (const s of toCheck) {
+    s.checked = true;
+    const diff    = ((price - s.entry) / s.entry * 100);
+    const hitTP1  = price >= s.tp1;
+    const hitTP2  = price >= s.tp2;
+    const hitSL   = price <= s.stopLoss;
+    const correct = diff > 0 && !hitSL;
+    totalSignals++;
+    if (correct) correctCalls++;
+    s.result = { diff, correct, hitTP1, hitTP2, hitSL };
+    const res = hitTP2 ? 'TP2 VURULDU' : hitTP1 ? 'TP1 VURULDU' : hitSL ? 'SL VURULDU' : (correct ? 'Artdi' : 'Dusdu');
+    const acc = ((correctCalls/totalSignals)*100).toFixed(1);
+    await sendTelegram(
+      (correct?'OK':'XX') + ' <b>Backtest: ' + s.symbol + '</b>\n' +
+      '4 saat sonra: ' + (diff>=0?'+':'') + diff.toFixed(2) + '%\n' +
+      'Netice: ' + res + '\n' +
+      'Xal: ' + s.score + '/30\n' +
+      'Deqiqlik: ' + acc + '% (' + correctCalls + '/' + totalSignals + ')'
+    );
+    await sleep(500);
   }
 }
 
-function startTelegramPolling() {
-  let lastUpdateId = 0;
+async function analyzeSymbol(symbol) {
+  try {
+    const tfs = [['1M',12],['1w',12],['1d',60],['4h',100],['1h',100],['15m',100],['5m',100]];
+    const tfData = {};
+    for (const [tf, limit] of tfs) {
+      tfData[tf] = await getBinanceCandles(symbol, tf, limit);
+      await sleep(120);
+    }
+
+    const price = tfData['1h'].length > 0 ? tfData['1h'][tfData['1h'].length-1].close : 0;
+    if (!price) return null;
+
+    await checkPastSignals(symbol, price);
+
+    let totalScore = 0, tfAlignment = 0;
+    const tfResults = [];
+
+    for (const [tf] of tfs) {
+      if (!tfData[tf] || tfData[tf].length < 5) continue;
+      const a = analyzeTimeframe(tfData[tf]);
+      if (!a) continue;
+      totalScore += a.score;
+      if (a.score > 3) tfAlignment++;
+      tfResults.push({ tf, score: a.score, signals: a.signals });
+    }
+
+    if (totalScore < 20 || tfAlignment < 4) return null;
+
+    const levels = calculateLevels(tfData['4h'], price);
+    if (!levels) return null;
+
+    const funding = marketState.fundingRates[symbol] || 0;
+    if (funding < -0.05) totalScore += 2;
+    else if (funding < 0) totalScore += 1;
+    else if (funding > 0.1) totalScore -= 1;
+
+    const fg = marketState.fearGreed;
+    if      (fg < 25) totalScore += 3;
+    else if (fg < 40) totalScore += 1;
+    else if (fg > 75) totalScore -= 1;
+
+    const btcD = marketState.btcDominance;
+    if      (btcD < 45) totalScore += 2;
+    else if (btcD > 55) totalScore -= 1;
+
+    if (totalScore < 22) return null;
+
+    return { symbol, price, totalScore, tfAlignment, tfResults, levels, funding };
+  } catch(e) {
+    console.error(symbol + ':', e.message);
+    return null;
+  }
+}
+
+function buildMessage(r) {
+  const { symbol, price, totalScore, tfAlignment, tfResults, levels, funding } = r;
+  const pct = Math.round(totalScore/30*100);
+  const lvl = pct>=90?'MAKSIMUM SIQNAL':pct>=75?'GUCLU SIQNAL':pct>=60?'YAXSI SIQNAL':'SIQNAL';
+  const acc = totalSignals>0 ? ((correctCalls/totalSignals)*100).toFixed(1)+'%' : 'Hesablanir';
+  const fg  = marketState.fearGreed;
+  const fgL = fg<25?'ASIRI QORXU':fg<45?'QORXU':fg<55?'NEYTRAL':fg<75?'TAMAH':'ASIRI TAMAH';
+
+  const tfLine = tfResults.map(t =>
+    TF_LABELS[t.tf] + ': ' + (t.score>=5?'OK':t.score>=2?'--':'XX') + ' (' + t.score + ')'
+  ).join('\n');
+
+  let tech = '';
+  for (const t of tfResults) {
+    if (t.signals.length > 0) {
+      tech += '\n[' + TF_LABELS[t.tf] + ']\n';
+      tech += t.signals.slice(0,2).map(s=>'- '+s).join('\n') + '\n';
+    }
+  }
+
+  return lvl + ': <b>' + symbol + '</b>\n' +
+    '================================\n' +
+    'Qiymet: <b>' + fmtPrice(price) + '</b>\n' +
+    'Uygunluq: <b>' + tfAlignment + '/7 timeframe</b>\n' +
+    'Xal: <b>' + totalScore + '/30</b>\n' +
+    '================================\n' +
+    'TIMEFRAME:\n' + tfLine + '\n' +
+    '================================\n' +
+    'GİRİS/CIXIS:\n' +
+    'Giris: <b>' + fmtPrice(levels.entry) + '</b>\n' +
+    'TP1: ' + fmtPrice(levels.tp1) + ' (' + levels.tp1Pct + '%)\n' +
+    'TP2: ' + fmtPrice(levels.tp2) + ' (' + levels.tp2Pct + '%)\n' +
+    'TP3: ' + fmtPrice(levels.tp3) + ' (' + levels.tp3Pct + '%)\n' +
+    'Stop Loss: ' + fmtPrice(levels.stopLoss) + ' (' + levels.slPct + '%)\n' +
+    'Risk/Reward: 1:' + levels.rr + '\n' +
+    '================================\n' +
+    'TEXNIKI:' + tech +
+    '================================\n' +
+    'BAZAR:\n' +
+    'Fear & Greed: ' + fg + ' (' + fgL + ')\n' +
+    'BTC Dominans: ' + marketState.btcDominance.toFixed(1) + '%\n' +
+    (funding!==0?'Funding: '+funding.toFixed(4)+'%\n':'') +
+    '================================\n' +
+    'Deqiqlik: ' + acc + (totalSignals>0?' ('+correctCalls+'/'+totalSignals+')':'') + '\n' +
+    new Date().toLocaleTimeString('az-AZ',{timeZone:'Asia/Baku'});
+}
+
+async function mainLoop() {
+  checkCount++;
+  console.log('\n['+new Date().toISOString()+'] Yoxlama #'+checkCount);
+  try {
+    [marketState.fearGreed, marketState.btcDominance, marketState.fundingRates] =
+      await Promise.all([getFearGreed(), getBTCDominance(), getFundingRates()]);
+    console.log('F&G:'+marketState.fearGreed+' BTC:'+marketState.btcDominance.toFixed(1)+'%');
+
+    if (checkCount % 10 === 1) {
+      topSymbols = await getTopSymbols();
+      console.log('Coinler: '+topSymbols.length);
+    }
+
+    const signals = [];
+    let analyzed  = 0;
+
+    for (const symbol of topSymbols) {
+      await sleep(300);
+      const result = await analyzeSymbol(symbol);
+      analyzed++;
+      if (result) {
+        signals.push(result);
+        console.log('SIQNAL: '+symbol+' xal:'+result.totalScore+' uygunluq:'+result.tfAlignment+'/7');
+      }
+      if (analyzed % 10 === 0) console.log(analyzed+'/'+topSymbols.length+' analiz edildi');
+    }
+
+    signals.sort((a,b) => b.totalScore - a.totalScore);
+    const now = Date.now();
+    let sent  = 0;
+
+    for (const r of signals) {
+      if (sent >= 2) break;
+      if (sentAlerts[r.symbol] && (now-sentAlerts[r.symbol]) < 4*60*60*1000) continue;
+      sentAlerts[r.symbol] = now;
+      signalHistory.push({
+        symbol: r.symbol, entry: r.levels.entry,
+        tp1: r.levels.tp1, tp2: r.levels.tp2,
+        stopLoss: r.levels.stopLoss, score: r.totalScore,
+        timestamp: now, checked: false, result: null
+      });
+      if (signalHistory.length > 200) signalHistory.shift();
+      await sendTelegram(buildMessage(r));
+      sent++;
+      await sleep(1000);
+    }
+
+    if (sent === 0) console.log('Siqnal yoxdur ('+signals.length+' zeyif)');
+
+    if (checkCount % 6 === 0) {
+      const fg  = marketState.fearGreed;
+      const fgL = fg<25?'ASIRI QORXU-ALIS FURSETI':fg<45?'QORXU':fg<55?'NEYTRAL':fg<75?'TAMAH':'ASIRI TAMAH-DIKKATLI';
+      await sendTelegram(
+        'Bazar Xulasesi\n================================\n' +
+        'Fear & Greed: '+fg+' ('+fgL+')\n' +
+        'BTC Dominans: '+marketState.btcDominance.toFixed(1)+'%\n' +
+        'Yoxlama: '+checkCount+'\nCoin: '+topSymbols.length+'\n' +
+        'Deqiqlik: '+(totalSignals>0?((correctCalls/totalSignals)*100).toFixed(1)+'%':'N/A')+'\n' +
+        new Date().toLocaleTimeString('az-AZ',{timeZone:'Asia/Baku'})
+      );
+    }
+  } catch(e) { console.error('Loop xeta:',e.message); }
+}
+
+function startPolling() {
+  let lastId = 0;
   async function poll() {
     try {
-      const url = 'https://api.telegram.org/bot' + BOT_TOKEN + '/getUpdates?offset=' + (lastUpdateId + 1) + '&timeout=30';
-      const data = await fetchJSON(url);
+      const data = await fetchJSON('https://api.telegram.org/bot'+BOT_TOKEN+'/getUpdates?offset='+(lastId+1)+'&timeout=30');
       if (data.ok && data.result.length > 0) {
-        for (const update of data.result) {
-          lastUpdateId = update.update_id;
-          const text = update.message && update.message.text;
+        for (const upd of data.result) {
+          lastId = upd.update_id;
+          const text = upd.message && upd.message.text;
           if (!text) continue;
-          if (text === '/status' || text === '/start') {
-            const acc = totalSignals > 0 ? ((correctCalls / totalSignals) * 100).toFixed(1) + '%' : 'Hele yoxdur';
-            await sendTelegram('✅ <b>HecmRadar Aktiv</b>\n\n🔄 Yoxlama sayi: ' + checkCount + '\n📊 Gonderilen siqnal: ' + signalHistory.length + '\n🎯 Deqiqlik: ' + acc + '\n⏱ Interval: 2 deqiqe\n\nSistem avtomatik isleyir.');
+          const acc = totalSignals>0?((correctCalls/totalSignals)*100).toFixed(1)+'%':'Hele yoxdur';
+          if (text==='/status'||text==='/start') {
+            await sendTelegram(
+              'HecmRadar v4 - SAH ESER\n\n' +
+              'Yoxlama: '+checkCount+'\nCoin: '+topSymbols.length+'\n' +
+              'Siqnal: '+signalHistory.length+'\nDeqiqlik: '+acc+'\n' +
+              'F&G: '+marketState.fearGreed+'\nBTC Dom: '+marketState.btcDominance.toFixed(1)+'%\n\n' +
+              '/status /top /market'
+            );
+          }
+          if (text==='/top') {
+            const recent = signalHistory.slice(-5).reverse();
+            if (!recent.length) { await sendTelegram('Hele siqnal yoxdur.'); }
+            else {
+              let msg = 'Son Siqnallar:\n\n';
+              for (const s of recent) {
+                const t   = new Date(s.timestamp).toLocaleTimeString('az-AZ',{timeZone:'Asia/Baku'});
+                const res = s.checked?(s.result.correct?'DURUST +'+s.result.diff.toFixed(1)+'%':'SEHV '+s.result.diff.toFixed(1)+'%'):'gozlenilir';
+                msg += s.symbol+' | '+t+' | xal:'+s.score+' | '+res+'\n';
+              }
+              await sendTelegram(msg);
+            }
+          }
+          if (text==='/market') {
+            const fg=marketState.fearGreed;
+            const fgL=fg<25?'ASIRI QORXU':fg<45?'QORXU':fg<55?'NEYTRAL':fg<75?'TAMAH':'ASIRI TAMAH';
+            await sendTelegram('Bazar Veziyyeti\n\nF&G: '+fg+' ('+fgL+')\nBTC Dom: '+marketState.btcDominance.toFixed(1)+'%\nCoin: '+topSymbols.length+'\n'+new Date().toLocaleTimeString('az-AZ',{timeZone:'Asia/Baku'}));
           }
         }
       }
@@ -236,19 +659,29 @@ function startTelegramPolling() {
 }
 
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-  const acc = totalSignals > 0 ? ((correctCalls / totalSignals) * 100).toFixed(1) + '%' : 'N/A';
-  res.writeHead(200, {'Content-Type': 'text/plain; charset=utf-8'});
-  res.end('HecmRadar v2 — Aktiv\nYoxlama: #' + checkCount + '\nSiqnal: ' + signalHistory.length + '\nDeqiqlik: ' + acc + '\n');
-}).listen(PORT, () => console.log('Server port ' + PORT + '-da isleyir'));
+http.createServer((req,res) => {
+  const acc = totalSignals>0?((correctCalls/totalSignals)*100).toFixed(1)+'%':'N/A';
+  res.writeHead(200,{'Content-Type':'text/plain;charset=utf-8'});
+  res.end('HecmRadar v4\nYoxlama:#'+checkCount+'\nCoin:'+topSymbols.length+'\nSiqnal:'+signalHistory.length+'\nDeqiqlik:'+acc+'\nF&G:'+marketState.fearGreed+'\n');
+}).listen(PORT,()=>console.log('Server port '+PORT+'-da isleyir'));
 
 async function start() {
-  console.log('HecmRadar v2 basladi');
-  await sendTelegram('🚀 <b>HecmRadar v2 Aktiv!</b>\n\nSistem basladi. Her 2 deqiqede 250 coin izlenilir.\n\n<b>Xal sistemi:</b>\n• Hecm artimi (maks 4 xal)\n• Qiymet deyisimi (maks 3 xal)\n• Qiymet momentumu (maks 2 xal)\n• Market cap (maks 2 xal)\n• Hecm/Cap nisbeti (maks 2 xal)\n\nYalniz <b>6+ xal</b> olan siqnallar gonderilir.\n\n/status — sistem veziyyeti');
-  await checkVolumes();
-  console.log('Ilk yukleme tamamlandi');
-  startTelegramPolling();
-  setInterval(checkVolumes, INTERVAL);
+  console.log('HecmRadar v4 - SAH ESER - baslatiliyor...');
+  await sendTelegram(
+    'HecmRadar v4 - SAH ESER AKTIV!\n\n' +
+    'Top-Down MTF: AYLIK->HEFTELIK->GUNLUK->4H->1H->15DEQ->5DEQ\n\n' +
+    'Analizler:\n- RSI + StochRSI\n- MACD + Bollinger\n- EMA 9/21/50/200\n' +
+    '- CRT + ATR\n- ICT Order Block + FVG\n- Supply & Demand\n' +
+    '- Market Structure HH/HL/LL/LH\n- Liquidity Sweep\n' +
+    '- Order Flow + Volume Delta\n- Fear & Greed\n- BTC Dominans\n' +
+    '- Funding Rate\n- ATR-based TP/SL\n- Backtest (4 saat sonra)\n\n' +
+    'Min 4/7 TF uygun olmalidir.\n\n/status /top /market'
+  );
+  topSymbols = await getTopSymbols();
+  console.log('Coinler: '+topSymbols.length);
+  startPolling();
+  await mainLoop();
+  setInterval(mainLoop, 2*60*60*1000);
 }
 
 start();
