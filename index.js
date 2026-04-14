@@ -62,7 +62,6 @@ async function getBinanceCandles(symbol, interval, limit) {
     }));
   } catch(e) { return []; }
 }
-
 async function getTopSymbols() {
   try {
     const data = await fetchJSON('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=80&page=1&sparkline=false');
@@ -70,15 +69,6 @@ async function getTopSymbols() {
     return data
       .filter(c => !stables.includes(c.id))
       .map(c => c.symbol.toUpperCase() + 'USDT');
-  } catch(e) { return []; }
-}
-    return data
-      .filter(t => t.symbol.endsWith('USDT') && !STABLE_SYMBOLS.includes(t.symbol))
-      .filter(t => !t.symbol.includes('UP') && !t.symbol.includes('DOWN') && !t.symbol.includes('BEAR') && !t.symbol.includes('BULL'))
-      .filter(t => parseFloat(t.quoteVolume) > 5000000)
-      .sort((a,b) => parseFloat(b.quoteVolume) - parseFloat(a.quoteVolume))
-      .slice(0, 80)
-      .map(t => t.symbol);
   } catch(e) { return []; }
 }
 
