@@ -66,8 +66,9 @@ async function getBinanceCandles(symbol, interval, limit) {
 async function getTopSymbols() {
   try {
     const data = await fetchJSON('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=volume_desc&per_page=80&page=1&sparkline=false');
+    const stables = ['tether','usd-coin','dai','binance-usd','true-usd','frax','usdd'];
     return data
-      .filter(c => !['tether','usd-coin','dai','binance-usd','true-usd'].includes(c.id))
+      .filter(c => !stables.includes(c.id))
       .map(c => c.symbol.toUpperCase() + 'USDT');
   } catch(e) { return []; }
 }
