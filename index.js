@@ -660,12 +660,17 @@ async function mainLoop() {
   }
 }
 
+
 function startPolling() {
   let lastId = 0;
+  let processing = false;
+
   async function poll() {
+    if (processing) { setTimeout(poll, 3000); return; }
     try {
-      const data = await fetchJSON('https://api.telegram.org/bot'+BOT_TOKEN+'/getUpdates?offset='+(lastId+1)+'&timeout=30');
+      const data = await fetchJSON('https://api.telegram.org/bot'+BOT_TOKEN+'/getUpdates?offset='+(lastId+1)+'&timeout=10');
       if (data.ok && data.result.length > 0) {
+        processing = true;
         for (const upd of data.result) {
           lastId = upd.update_id;
           const text = upd.message && upd.message.text;
@@ -685,11 +690,10 @@ function startPolling() {
               '₿ BTC Dominans: '+marketState.btcDominance.toFixed(1)+'%\n\n'+
               '/status - bu mesaj\n'+
               '/top - son siqnallar\n'+
-              '/market - bazar veziyyeti'
+              '/market - bazar veziyyeti\n'+
+              'SOL - istediyin coini yaz'
             );
-          }
-
-          if (text==='/top') {
+          } else if (text==='/top') {
             const recent = signalHistory.slice(-5).reverse();
             if (!recent.length) {
               await sendTelegram('📊 Hele siqnal yoxdur.');
@@ -704,9 +708,7 @@ function startPolling() {
               }
               await sendTelegram(msg);
             }
-          }
-
-          if (text==='/market') {
+          } else if (text==='/market') {
             await sendTelegram(
               '🌍 Bazar Veziyyeti\n\n'+
               fgL+' Fear & Greed: '+fg+'\n'+
@@ -714,29 +716,28 @@ function startPolling() {
               '📊 Analiz edilen: '+topSymbols.length+' coin\n'+
               '⏰ '+new Date().toLocaleTimeString('az-AZ',{timeZone:'Asia/Baku'})
             );
+          } else if (!text.startsWith('/')) {
+            const symbol = text.toUpperCase().replace('USDT','').trim() + 'USDT';
+            await sendTelegram('🔍 ' + symbol + ' analiz edilir... 30-60 saniye gözlə');
+            const result = await analyzeSymbol(symbol);
+            if (result) {
+              await sendTelegram(buildMessage(result));
+            } else {
+              await sendTelegram(
+                '❌ ' + symbol + ' ucun siqnal yoxdur\n\n'+
+                'Sebeb: Xal heddine catmadi\n'+
+                'Coin movcud deyil ve ya hecmi azdir'
+              );
+            }
           }
-if (!text.startsWith('/')) {
-  const symbol = text.toUpperCase().replace('USDT','').trim() + 'USDT';
-  await sendTelegram('🔍 ' + symbol + ' analiz edilir... 30-60 saniye gözlə');
-  const result = await analyzeSymbol(symbol);
-  if (result) {
-    await sendTelegram(buildMessage(result));
-  } else {
-    await sendTelegram(
-      '❌ ' + symbol + ' üçün siqnal yoxdur\n\n'+
-      'Səbəb: Xal həddinə çatmadı\n'+
-      'Coin mövcud deyil və ya həcmi azdır'
-    );
-  }
-}
         }
+        processing = false;
       }
-    } catch(e) {}
-    setTimeout(poll, 3000);
+    } catch(e) { processing = false; }
+    setTimeout(poll, 5000);
   }
   poll();
 }
-
 const PORT = process.env.PORT || 3000;
 http.createServer((req,res) => {
   const acc = totalSignals>0?((correctCalls/totalSignals)*100).toFixed(1)+'%':'N/A';
