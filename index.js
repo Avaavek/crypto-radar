@@ -715,6 +715,20 @@ function startPolling() {
               '⏰ '+new Date().toLocaleTimeString('az-AZ',{timeZone:'Asia/Baku'})
             );
           }
+if (!text.startsWith('/')) {
+  const symbol = text.toUpperCase().replace('USDT','').trim() + 'USDT';
+  await sendTelegram('🔍 ' + symbol + ' analiz edilir... 30-60 saniye gözlə');
+  const result = await analyzeSymbol(symbol);
+  if (result) {
+    await sendTelegram(buildMessage(result));
+  } else {
+    await sendTelegram(
+      '❌ ' + symbol + ' üçün siqnal yoxdur\n\n'+
+      'Səbəb: Xal həddinə çatmadı\n'+
+      'Coin mövcud deyil və ya həcmi azdır'
+    );
+  }
+}
         }
       }
     } catch(e) {}
