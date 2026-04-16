@@ -176,3 +176,235 @@ function sendTelegram(text) {
     req.end();
   });
 }
+
+async function checkPastSignals(currentCoins) {
+  const now = Date.now();
+  const toCheck = signalHistory.filter(s =>
+    !s.checked &&
+    (now - s.timestamp) >= 30*60*1000 &&
+    (now - s.timestamp) <= 35*60*1000
+  );
+  for (const signal of toCheck) {
+    const coin = currentCoins.find(c => c.id === signal.id);
+    if (!coin) continue;
+    signal.checked = true;
+    const priceDiff = ((coin.current_price - signal.price) / signal.price) * 100;
+    const correct   = priceDiff > 0;
+    totalSignals++;
+    if (correct) correctCalls++;
+    signal.result = { priceDiff, correct };
+    const sign = priceDiff >= 0 ? '+' : '';
+    await sendTelegram(
+      (correct ? '✅' : '❌') + ' <b>Backtest: ' + signal.symbol + '</b>\n' +
+      '30 deq sonraki netice: ' + sign + priceDiff.toFixed(2) + '%\n' +
+      'Siqnal xali: ' + signal.score + '/18\n' +
+      'Umumi deqiqlik: ' + ((correctCalls/totalSignals)*100).toFixed(1) + '% (' + correctCalls + '/' + totalSignals + ')'
+    );
+    console.log('Backtest ' + signal.symbol + ': ' + (correct?'DURUST':'SEHV') + ' ' + priceDiff.toFixed(2) + '%');
+    await sleep(500);
+  }
+}
+
+async function fetchData() {
+  checkCount++;
+  console.log('[' + new Date().toISOString() + '] Yoxlama #' + checkCount);
+
+  try {
+    const url = 'https://api.coingecko.com/api/v3/coins/markets' +
+      '?vs_currency=usd&order=volume_desc&per_page=250&page=1&sparkline=false';
+
+    const data = await fetchJSON(url);
+    const now  = Date.now();
+    const newPrev = {};
+    const signals = [];
+
+    await checkPastSignals(data);
+
+    for (const c of data) {
+      const price = c.current_price || 0;
+      if (!priceHistory[c.id]) priceHistory[c.id] = [];
+      priceHistory[c.id].push(price);
+      if (priceHistory[c.id].length > 20) priceHistory[c.id].shift();
+
+      newPrev[c.id] = { vol: c.total_volume||0, price, high24h: c.high_24h||0, low24h: c.low_24h||0, ts: now };
+
+      if (isStable(c)) continue;
+      if ((c.total_volume||0) < 200000) continue;
+      if (!prevData[c.id]) continue;
+
+      const result = calculateScore(c, prevData[c.id]);
+      if (!result) continue;
+      const { score, reasons, volRatio, rsi, breakout } = result;
+      if (score < 6) continue;
+      if (sentAlerts[c.id] && (now - sentAlerts[c.id]) < 45*60*1000) continue;
+
+      signals.push({ ...c, score, reasons, volRatio, rsi, breakout });
+    }
+
+    prevData = newPrev;
+    signals.sort((a,b) => b.score - a.score);
+    const top = signals.slice(0, 3);
+
+    for (const c of top) {
+      sentAlerts[c.id] = now;
+      signalHistory.push({
+        id: c.id, symbol: c.symbol.toUpperCase(),
+        price: c.current_price, score: c.score,
+        timestamp: now, checked: false, result: null
+      });
+      if (signalHistory.length > 300) signalHistory.shift();
+
+      const accuracy = totalSignals > 0 ? ((correctCalls/totalSignals)*100).toFixed(1) + '%' : 'Hesablanir';
+      const level = c.score >= 13 ? '🔥 GUCLU SIQNAL' : c.score >= 10 ? '⚡ YAXSI SIQNAL' : '📊 SIQNAL';
+      const change = c.price_change_percentage_24h || 0;
+      const sign   = change >= 0 ? '+' : '';
+      const rsiLine = c.rsi !== null && c.rsi !== undefined
+        ? 'RSI: ' + c.rsi + (c.rsi<30?' - ALIS FURSETI 💎':c.rsi>70?' - DIKKATLI ⚠️':'') + '\n'
+        : '';
+      const brkLine = c.breakout ? 'Breakout: ' + c.breakout.label + '\n' : '';
+
+      const msg =
+        level + ': <b>' + c.symbol.toUpperCase() + '</b>\n' +
+        '════════════════════════════\n' +
+        '💰 Qiymet: <b>' + fmtPrice(c.current_price) + '</b>\n' +
+        '📊 24s deyisim: ' + sign + change.toFixed(2) + '%\n' +
+        '📦 Hecm: ' + fmt(c.total_volume) + '\n' +
+        '🚀 Hecm artimi: <b>' + c.volRatio.toFixed(1) + 'x</b>\n' +
+        (rsiLine ? '📉 ' + rsiLine : '') +
+        (brkLine ? '💥 ' + brkLine : '') +
+        '⭐ Xal: <b>' + c.score + '/18</b>\n' +
+        '════════════════════════════\n' +
+        '📋 Sebbler:\n' + c.reasons.map(r => '• ' + r).join('\n') + '\n' +
+        '════════════════════════════\n' +
+        '🎯 Deqiqlik: ' + accuracy + (totalSignals > 0 ? ' (' + correctCalls + '/' + totalSignals + ')' : '') + '\n' +
+        '⏰ ' + new Date().toLocaleTimeString('az-AZ', {timeZone:'Asia/Baku'});
+
+      await sendTelegram(msg);
+      console.log('-> ' + c.symbol.toUpperCase() + ' xal:' + c.score + ' RSI:' + c.rsi);
+      await sleep(600);
+    }
+
+    if (top.length === 0) console.log('-> Siqnal yoxdur (' + signals.length + ' zeyif var)');
+
+    if (checkCount % 20 === 0 && totalSignals > 0) {
+      const acc = ((correctCalls/totalSignals)*100).toFixed(1);
+      await sendTelegram(
+        '📊 Sistem Statistikasi\n' +
+        '════════════════════════════\n' +
+        '✅ Durust siqnal: ' + correctCalls + '/' + totalSignals + '\n' +
+        '🎯 Deqiqlik: <b>' + acc + '%</b>\n' +
+        '🔄 Yoxlama sayi: ' + checkCount + '\n' +
+        '📈 Izlenen coin: 250\n' +
+        '⏰ ' + new Date().toLocaleTimeString('az-AZ', {timeZone:'Asia/Baku'})
+      );
+    }
+
+  } catch(err) {
+    console.error('Xeta:', err.message);
+    if (err.message.includes('429') || err.message.includes('rate')) {
+      console.log('Rate limit - 3 deq gozlenilir...');
+      await sleep(180000);
+    }
+  }
+}
+
+function startPolling() {
+  let lastId = 0;
+  let processing = false;
+
+  async function poll() {
+    if (processing) { setTimeout(poll, 5000); return; }
+    try {
+      const data = await fetchJSON(
+        'https://api.telegram.org/bot' + BOT_TOKEN +
+        '/getUpdates?offset=' + (lastId+1) + '&timeout=10'
+      );
+      if (data.ok && data.result.length > 0) {
+        processing = true;
+        for (const upd of data.result) {
+          lastId = upd.update_id;
+          if (processedIds.has(upd.update_id)) continue;
+          processedIds.add(upd.update_id);
+          if (processedIds.size > 1000) {
+            const first = processedIds.values().next().value;
+            processedIds.delete(first);
+          }
+
+          const text = upd.message && upd.message.text;
+          if (!text) continue;
+
+          const acc = totalSignals > 0 ? ((correctCalls/totalSignals)*100).toFixed(1) + '%' : 'Hele yoxdur';
+
+          if (text === '/status' || text === '/start') {
+            await sendTelegram(
+              '🤖 <b>HecmRadar v2 Aktiv</b>\n\n' +
+              '🔄 Yoxlama sayi: ' + checkCount + '\n' +
+              '📊 Gonderilen siqnal: ' + signalHistory.length + '\n' +
+              '🎯 Deqiqlik: ' + acc + '\n' +
+              '📈 Izlenen coin: 250\n\n' +
+              '/status - bu mesaj\n' +
+              '/top - son siqnallar'
+            );
+          } else if (text === '/top') {
+            const recent = signalHistory.slice(-5).reverse();
+            if (!recent.length) {
+              await sendTelegram('📊 Hele siqnal yoxdur.');
+            } else {
+              let msg = '📋 <b>Son Siqnallar:</b>\n\n';
+              for (const s of recent) {
+                const t   = new Date(s.timestamp).toLocaleTimeString('az-AZ', {timeZone:'Asia/Baku'});
+                const res = s.checked
+                  ? (s.result.correct ? '✅ +' + s.result.priceDiff.toFixed(1) + '%' : '❌ ' + s.result.priceDiff.toFixed(1) + '%')
+                  : '⏳ gozlenilir';
+                msg += '• ' + s.symbol + ' | ' + t + ' | ⭐' + s.score + ' | ' + res + '\n';
+              }
+              await sendTelegram(msg);
+            }
+          }
+        }
+        processing = false;
+      }
+    } catch(e) { processing = false; }
+    setTimeout(poll, 5000);
+  }
+  poll();
+}
+
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  const acc = totalSignals > 0 ? ((correctCalls/totalSignals)*100).toFixed(1) + '%' : 'N/A';
+  res.writeHead(200, {'Content-Type': 'text/plain; charset=utf-8'});
+  res.end(
+    'HecmRadar v2\n' +
+    'Yoxlama:#' + checkCount + '\n' +
+    'Siqnal:' + signalHistory.length + '\n' +
+    'Deqiqlik:' + acc + '\n' +
+    'Coin:250\n'
+  );
+}).listen(PORT, () => console.log('Server port ' + PORT + '-da isleyir'));
+
+async function start() {
+  console.log('HecmRadar v2 basladi');
+  await sendTelegram(
+    '🚀 <b>HecmRadar v2 Aktiv!</b>\n\n' +
+    '📈 250 coin izlenilir\n' +
+    '⏱ Her 2 deqiqede yoxlama\n\n' +
+    '✅ Analizler:\n' +
+    '• Hecm artimi\n' +
+    '• Qiymet deyisimi\n' +
+    '• RSI gostericisi\n' +
+    '• Breakout askarlamasi\n' +
+    '• Market cap filteri\n' +
+    '• Backtest (30 deq sonra netice)\n\n' +
+    'Yalniz 6+ xal olan siqnallar gonderilir.\n\n' +
+    '/status - sistem veziyyeti\n' +
+    '/top - son siqnallar'
+  );
+
+  await fetchData();
+  console.log('Ilk yukleme tamamlandi');
+  startPolling();
+  setInterval(fetchData, REFRESH_SEC * 1000);
+}
+
+start();
